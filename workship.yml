@@ -1,0 +1,414 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Sets up pytorch sagemaker workshop
+Mappings:
+  RegionMap: 
+    us-east-2:
+      SnapshotClusterIdentifier: "finalreinvent"
+      SnapshotIdentifier: "copy:finalreinvent1"
+    us-west-2:
+      SnapshotClusterIdentifier: "finalreinvent"
+      SnapshotIdentifier: "finalreinvent1"
+    eu-west-1:
+      SnapshotClusterIdentifier: "finalreinvent"
+      SnapshotIdentifier: "copy:finalreinvent2"
+    ap-southeast-2:
+      SnapshotClusterIdentifier: "finalreinvent"
+      SnapshotIdentifier: "copy:finalreinvent3"
+    ap-northeast-1:
+      SnapshotClusterIdentifier: "finalreinvent"
+      SnapshotIdentifier: "copy:finalreinvent4"
+  SubnetConfig:
+    VPC:
+      CIDR: "10.0.0.0/16"
+    Public:
+      CIDR: "10.0.0.0/24"
+    Private:
+      CIDR: "10.0.1.0/24"
+Resources:
+  GlueRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Principal:
+              Service:
+                - "glue.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        -
+          PolicyName: "root"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              -
+                Effect: "Allow"
+                Action: "*"
+                Resource: "*"
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: pytorch-workshop
+        Description: Database to hold tables pytorch workshop
+#Create a crawler to crawl the flights data on S3 bucket
+  InferenceOutputCrawler:
+    Type: AWS::Glue::Crawler
+    DependsOn: "GlueRole"
+    Properties:
+      Name: InferenceOutputCrawler
+      Role: !GetAtt GlueRole.Arn
+      #Classifiers: none, use the default classifier
+      Description: AWS Glue crawler to crawl flights data
+      #Schedule: none, use default run-on-demand
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          # Public S3 bucket with the flights data
+          #- Path: !Join [ '/', [ 's3:/', !Ref 'InferenceBucket', 'out' ]]
+          - Path: "s3://reinvent2018-sagemaker-pytorch/data/sample/batch-32/out/"
+      SchemaChangePolicy:
+        UpdateBehavior: "UPDATE_IN_DATABASE"
+        DeleteBehavior: "LOG"
+      Configuration: "{\"Version\":1.0,\"CrawlerOutput\":{\"Partitions\":{\"AddOrUpdateBehavior\":\"InheritFromTable\"},\"Tables\":{\"AddOrUpdateBehavior\":\"MergeNewColumns\"}}}"
+  ProductCatalogCrawler:
+    Type: AWS::Glue::Crawler
+    DependsOn: "GlueRole"
+    Properties:
+      Name: ProductCatalogCrawler
+      Role: !GetAtt GlueRole.Arn
+      #Classifiers: none, use the default classifier
+      Description: AWS Glue crawler to crawl flights data
+      #Schedule: none, use default run-on-demand
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          # Public S3 bucket with the flights data
+          - Path: !Join [ '/', [ 's3:/', !Ref 'InferenceBucket', 'catalog' ]]
+      SchemaChangePolicy:
+        UpdateBehavior: "UPDATE_IN_DATABASE"
+        DeleteBehavior: "LOG"
+      Configuration: "{\"Version\":1.0,\"CrawlerOutput\":{\"Partitions\":{\"AddOrUpdateBehavior\":\"InheritFromTable\"},\"Tables\":{\"AddOrUpdateBehavior\":\"MergeNewColumns\"}}}"
+  InferenceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      Tags:
+      - Key: Name
+        Value: pytorch-workshop-bucket-1
+      - Key: Region
+        Value: !Sub "${AWS::Region}"
+  PyTorchWorkshopNotebookInstance:
+    Type: "AWS::SageMaker::NotebookInstance"
+    Properties:
+      InstanceType: "ml.t2.large"
+      RoleArn: !GetAtt ExecutionRole.Arn
+  GlueETLJob:
+    Type: AWS::Glue::Job
+    Properties:
+      DefaultArguments:
+        "--AWS_REGION": !Sub "${AWS::Region}"
+      Command:
+        Name: glueetl
+        ScriptLocation: !Join [ '/', [ 's3:/', !Ref 'InferenceBucket', 'etl.py' ]]
+      ExecutionProperty:
+        MaxConcurrentRuns: 1
+      MaxRetries: 0
+      Name: pytorch-workshop-etl
+      Role: !Ref GlueRole
+  ExecutionRole: 
+    Type: "AWS::IAM::Role"
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: "2012-10-17"
+        Statement: 
+          - 
+            Effect: "Allow"
+            Principal: 
+              Service: 
+                - "sagemaker.amazonaws.com"
+            Action: 
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies: 
+        - 
+          PolicyName: "sagemaker-instance-policy"
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement: 
+              - 
+                Effect: "Allow"
+                Action: "*"
+                Resource: "*"
+  CopyS3ObjectFunction:
+    Properties:
+      Description: Copies objects from a source S3 bucket to a destination
+      Handler: index.handler
+      Runtime: python2.7
+      Role: !GetAtt S3CopyRole.Arn
+      MemorySize: 3008
+      Timeout: 900
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import cfnresponse
+
+          import boto3
+          from botocore.exceptions import ClientError
+          client = boto3.client('s3')
+          s3 = boto3.resource('s3')
+
+          import logging
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def copy_objects(source_bucket, source_prefix, bucket, prefix):
+            paginator = client.get_paginator('list_objects_v2')
+            page_iterator = paginator.paginate(Bucket=source_bucket, Prefix=source_prefix)
+            for key in {x['Key'] for page in page_iterator for x in page['Contents']}:
+              dest_key = os.path.join(prefix, os.path.relpath(key, source_prefix))
+              if not key.endswith('/'):
+                client.copy_object(CopySource={'Bucket': source_bucket, 'Key': key}, Bucket=bucket, Key = dest_key)
+            return cfnresponse.SUCCESS
+
+          def handler(event, context):
+            logger.info("Received event: %s" % json.dumps(event))
+            source_bucket = event['ResourceProperties']['SourceBucket']
+            source_prefix = event['ResourceProperties'].get('SourcePrefix')
+            bucket = event['ResourceProperties']['DestinationBucket']
+            prefix = 'catalog/product_catalog.txt'
+            inference_out_prefix = event['ResourceProperties']['InferenceOutPrefix']
+            inference_out_new_prefix = "out/"
+            script_prefix = event['ResourceProperties']['ScriptPrefix']
+            script_destination = "etl.py"
+
+            result = cfnresponse.SUCCESS
+
+            try:
+              if event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
+                client.copy_object(CopySource={'Bucket': source_bucket, 'Key': source_prefix}, Bucket=bucket, Key = prefix)
+                print(source_bucket)
+                print(event['ResourceProperties'])
+                print(source_bucket)
+                print(script_prefix)
+                print(bucket)
+                print(prefix)
+                resp = client.copy_object(CopySource={'Bucket': source_bucket, 'Key': script_prefix}, Bucket=bucket, Key = script_destination)
+                print(resp)
+                #result = copy_objects(source_bucket, script_prefix, bucket, script_destination)
+              elif event['RequestType'] == 'Delete':
+                bucket = s3.Bucket(bucket)
+                for key in bucket.objects.all():
+                    key.delete()
+                bucket.delete()
+            except ClientError as e:
+              logger.error('Error: %s', e)
+              result = cfnresponse.FAILED
+
+            cfnresponse.send(event, context, result, {})
+
+    Type: AWS::Lambda::Function
+  S3ObjectCopy:
+    Properties:
+      ServiceToken: !GetAtt CopyS3ObjectFunction.Arn
+      DestinationBucket: !Ref InferenceBucket
+      SourceBucket: "reinvent2018-sagemaker-pytorch"
+      SourcePrefix: "data/workshop/tables/product_catalog.txt"
+      ScriptPrefix: "source/etl/etl.py"
+      InferenceOutPrefix: "data/sample/batch-32/out/"
+    Type: "Custom::S3ObjectCopy"
+  S3CopyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /pytorch-workshop-copy-role/
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        -
+          PolicyName: S3Access
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              -
+                Sid: AllowLogging
+                Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "*"
+              -
+                Sid: s3WriteAccess
+                Effect: Allow
+                Action:
+                  - "s3:ListBucket"
+                  - "s3:GetObject"
+                  - "s3:PutObject"
+                  - "s3:PutObjectAcl"
+                  - "s3:PutObjectVersionAcl"
+                  - "s3:DeleteObject"
+                  - "s3:DeleteObjectVersion"
+                  - "s3:CopyObject"
+                Resource: "*"
+  QuicksightSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Limits security group egress traffic
+      SecurityGroupIngress:
+      - CidrIp: 54.70.204.128/27
+        IpProtocol: "-1"
+      - CidrIp: 52.23.63.224/27
+        IpProtocol: "-1"
+      - CidrIp: 52.15.247.160/27
+        IpProtocol: "-1"
+      - CidrIp: 52.210.255.224/27
+        IpProtocol: "-1"
+      - CidrIp: 13.229.254.0/27
+        IpProtocol: "-1"
+      - CidrIp: 54.153.249.96/27
+        IpProtocol: "-1"
+      - CidrIp: 13.113.244.32/27
+        IpProtocol: "-1"
+      VpcId: !Ref VPC
+  myClusterSubnetGroup:
+    Type: 'AWS::Redshift::ClusterSubnetGroup'
+    Properties:
+      Description: My ClusterSubnetGroup
+      SubnetIds:
+        - !Ref PublicSubnet
+  myCluster: 
+    Type: "AWS::Redshift::Cluster"
+    DependsOn: "GatewayToInternet"
+    Properties:
+      DBName: "mydb"
+      MasterUsername: "master"
+      MasterUserPassword: "MasterUserPassword1"
+      ClusterSubnetGroupName: !Ref myClusterSubnetGroup
+      NodeType: "dc2.xlarge"
+      ClusterType: "multi-node"
+      NumberOfNodes: 2
+      PubliclyAccessible: True
+      OwnerAccount: "127653344563"
+      SnapshotClusterIdentifier: 
+        Fn::FindInMap: 
+          - "RegionMap"
+          - !Ref 'AWS::Region'
+          - "SnapshotClusterIdentifier"
+      SnapshotIdentifier: 
+        Fn::FindInMap: 
+          - "RegionMap"
+          - !Ref 'AWS::Region'
+          - "SnapshotIdentifier"
+      VpcSecurityGroupIds:
+        - !Ref QuicksightSG
+      Tags:
+        - Key: Name
+          Value: pytorch-workshop-redshift-cluster
+  VPC:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: "true"
+      CidrBlock:
+        Fn::FindInMap:
+          - "SubnetConfig"
+          - "VPC"
+          - "CIDR"
+      Tags:
+        -
+          Key: "Application"
+          Value:
+            Ref: "AWS::StackName"
+        -
+          Key: "Network"
+          Value: "Public"
+        -
+          Key: "Name"
+          Value: "VPC Public and Private with NAT"
+  PublicSubnet:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId:
+        Ref: "VPC"
+      CidrBlock:
+        Fn::FindInMap:
+          - "SubnetConfig"
+          - "Public"
+          - "CIDR"
+      MapPublicIpOnLaunch: "true"
+      Tags:
+        -
+          Key: "Application"
+          Value:
+            Ref: "AWS::StackName"
+        -
+          Key: "Network"
+          Value: "Public"
+        -
+          Key: "Name"
+          Value: "Public"
+  InternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+    Properties:
+      Tags:
+        -
+          Key: "Application"
+          Value:
+            Ref: "AWS::StackName"
+        -
+          Key: "Network"
+          Value: "Public"
+  GatewayToInternet:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      VpcId:
+        Ref: "VPC"
+      InternetGatewayId:
+        Ref: "InternetGateway"
+  PublicRouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId:
+        Ref: "VPC"
+      Tags:
+        -
+          Key: "Application"
+          Value:
+            Ref: "AWS::StackName"
+        -
+          Key: "Network"
+          Value: "Public"
+  PublicRoute:
+    Type: "AWS::EC2::Route"
+    DependsOn: "GatewayToInternet"
+    Properties:
+      RouteTableId:
+        Ref: "PublicRouteTable"
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId:
+        Ref: "InternetGateway"
+  PublicSubnetRouteTableAssociation:
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties:
+      SubnetId:
+        Ref: "PublicSubnet"
+      RouteTableId:
+        Ref: "PublicRouteTable"
+Outputs:
+  SagemakerRole:
+    Description: "Role for sagemaker"
+    Value: !GetAtt ExecutionRole.Arn
+  BatchInferenceLocation:
+    Description: 'S3 Location for inferences'
+    Value: !Join [ '/', [ 's3:/', !Ref 'InferenceBucket', 'inference' ]]
