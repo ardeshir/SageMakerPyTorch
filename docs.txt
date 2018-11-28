@@ -1,5 +1,16 @@
 # docs - link: http://bit.ly/2Sits3F
 
+# arn:aws:iam::195020313210:role/workshop-ExecutionRole-B0F1X40ENWD3
+# s3://workshop-inferencebucket-nny7vrcvge4r/inference
+
+# NotebooK: https://pytorchworkshopnotebookinstance-jkqipzbpfkon.notebook.us-east-2.sagemaker.aws/lab
+
+INFO:sagemaker:Created S3 bucket: sagemaker-us-east-2-195020313210
+Your SageMaker bucket: sagemaker-us-east-2-195020313210
+Current working directory: /home/ec2-user/SageMaker
+S3 location for storing training data: s3://sagemaker-us-east-2-195020313210/sagemaker/DEMO-pytorch-siamese-network/data
+
+
 cd /home/ec2-user/SageMaker
 
 wget https://raw.githubusercontent.com/dylan-tong-aws/pytorch-image-similarity/master/notebooks/reinvent_pytorch_siamese_network.ipynb
