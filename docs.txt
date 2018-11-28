@@ -1,0 +1,16 @@
+# docs - link: http://bit.ly/2Sits3F
+
+cd /home/ec2-user/SageMaker
+
+wget https://raw.githubusercontent.com/dylan-tong-aws/pytorch-image-similarity/master/notebooks/reinvent_pytorch_siamese_network.ipynb
+
+520713654638.dkr.ecr.<<replace with your-region>>.amazonaws.com/sagemaker-pytorch:0.4.0-cpu-py3 
+
+s3://<<Your SageMaker Bucket>>/sagemaker/DEMO-pytorch-siamese-network/model/output/model.tar.gz
+
+s3://<<Your SageMaker Bucket>>/sagemaker/DEMO-pytorch-siamese-network/model/source/sourcedir.tar.gz
+
+aws s3 sync s3://reinvent2018-sagemaker-pytorch/data/sample/batch-workshop/in s3://<<Your SageMaker Bucket>>/sagemaker/DEMO-pytorch-siamese-network/data/batch/in
+
+s3://<<Your SageMaker Bucket>>/sagemaker/DEMO-pytorch-siamese-network/data/batch/in
+
